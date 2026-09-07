@@ -1,0 +1,17 @@
+# Build output
+/build/
+
+# ESP-IDF local config
+/sdkconfig
+/sdkconfig.old
+
+# Generated artifacts
+*.bin
+*.elf
+*.map
+*.log
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
