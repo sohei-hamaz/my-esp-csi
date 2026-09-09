@@ -2,6 +2,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/queue.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
@@ -61,6 +62,78 @@ static const char *TAG = "main";
 
 static int s_retry_num = 0;
 
+typedef struct {
+    int8_t rssi;
+    uint16_t len;
+    uint8_t mac[6];
+    int8_t buf[384];
+} csi_packet_t;
+
+/* FreeRTOS queue for storing CSI received packets
+   sent from an ISR via xQueueSendFromISR and processed by csi_process_task */
+static QueueHandle_t s_csi_queue = NULL;
+
+/* CSI reception callback (interrupt context)
+   copy the RSSI/MAC/length/buffer to csi_packet_t and send it to s_csi_queue using xQueueSendFromISR */
+static void wifi_csi_callback(void *ctx, wifi_csi_info_t *info)
+{
+    csi_packet_t pkt;
+    pkt.rssi = info->rx_ctrl.rssi;
+    pkt.len = info->len;
+    memcpy(pkt.mac, info->mac, 6);
+
+    size_t copy_len;
+    if(info->len < sizeof(pkt.buf)) {
+        copy_len = info->len;
+    } else {
+        copy_len = sizeof(pkt.buf);
+    }
+    memcpy(pkt.buf, info->buf, copy_len);
+
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xQueueSendFromISR(s_csi_queue, &pkt, &xHigherPriorityTaskWoken);
+    if (xHigherPriorityTaskWoken == pdTRUE) {
+            portYIELD_FROM_ISR();
+        }
+}
+
+/* CSI processing task
+   recieve csi_packet_t from s_csi_queue and perform processing such as logging */
+static void csi_process_task(void *pvParameters)
+{
+    csi_packet_t pkt;
+    while(1) {
+        if(xQueueReceive(s_csi_queue, &pkt, portMAX_DELAY) == pdPASS) {
+            ESP_LOGI(TAG, "Recv CSI | RSSI: %d | Len: %d | [I, Q]: [%d, %d], [%d, %d], [%d, %d], [%d, %d], ...",
+                     pkt.rssi, pkt.len, pkt.buf[0], pkt.buf[1], pkt.buf[2], pkt.buf[3], pkt.buf[4], pkt.buf[5], pkt.buf[6], pkt.buf[7]);
+        }
+    }
+}
+
+/* CSI initialization function
+   create s_csi_queue and start csi_process_task
+   configure CSI settings, register the callback, and enable CSI reception */
+static void app_csi_init(void)
+{
+    s_csi_queue = xQueueCreate(20, sizeof(csi_packet_t));
+    xTaskCreate(csi_process_task, "csi_process_task", 4096, NULL, 5, NULL);
+
+    wifi_csi_config_t csi_config = {
+        .lltf_en           = true,
+        .htltf_en          = true,
+        .stbc_htltf2_en    = true,
+        .ltf_merge_en      = true,
+        .channel_filter_en = true,
+        .manu_scale        = false,
+        .dump_ack_en       = false
+    };
+
+    ESP_ERROR_CHECK(esp_wifi_set_csi_config(&csi_config));
+    ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(wifi_csi_callback, NULL));
+    ESP_ERROR_CHECK(esp_wifi_set_csi(true));
+
+    ESP_LOGI(TAG, "CSI Enabled Successfully.");
+}
 
 static void event_handler(void* arg, esp_event_base_t event_base,
                                 int32_t event_id, void* event_data)
@@ -144,11 +217,10 @@ void wifi_init_sta(void)
     /* xEventGroupWaitBits() returns the bits before the call returned, hence we can test which event actually
      * happened. */
     if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "connected to ap SSID:%s",
-                 EXAMPLE_ESP_WIFI_SSID);
+        ESP_LOGI(TAG, "connected to ap SSID:%s", EXAMPLE_ESP_WIFI_SSID);
+        app_csi_init();
     } else if (bits & WIFI_FAIL_BIT) {
-        ESP_LOGI(TAG, "Failed to connect to SSID:%s",
-                 EXAMPLE_ESP_WIFI_SSID);
+        ESP_LOGI(TAG, "Failed to connect to SSID:%s", EXAMPLE_ESP_WIFI_SSID);
     } else {
         ESP_LOGE(TAG, "UNEXPECTED EVENT");
     }
