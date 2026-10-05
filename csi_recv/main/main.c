@@ -1,122 +1,169 @@
+#include <stdio.h>
 #include <string.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/event_groups.h"
-#include "freertos/queue.h"
-#include "esp_system.h"
-#include "esp_wifi.h"
-#include "esp_event.h"
-#include "esp_log.h"
+#include <stdlib.h>
+
 #include "nvs_flash.h"
 
-#include "lwip/err.h"
-#include "lwip/sys.h"
+#include "esp_mac.h"
+#include "rom/ets_sys.h"
+#include "esp_log.h"
+#include "esp_wifi.h"
+#include "esp_netif.h"
+#include "esp_now.h"
+#include "esp_csi_gain_ctrl.h"
 
-/* The examples use WiFi configuration that you can set via project configuration menu
+#define CONFIG_LESS_INTERFERENCE_CHANNEL    11
+#define CONFIG_WIFI_BANDWIDTH               WIFI_BW40
 
-   If you'd rather not, just change the below entries to strings with
-   the config you want - ie #define EXAMPLE_WIFI_SSID "mywifissid"
+#define CONFIG_ESP_NOW_PHYMODE              WIFI_PHY_MODE_HT40
+#define CONFIG_ESP_NOW_RATE                 WIFI_PHY_RATE_MCS0_LGI
+
+#define CONFIG_GAIN_CONTROL                 1
+#define CONFIG_FORCE_GAIN                   0
+
+static const uint8_t CONFIG_CSI_SEND_MAC[] = {0x1a, 0x00, 0x00, 0x00, 0x00, 0x00};
+static const char *TAG = "csi_recv";
+
+/*  wifi_init:
+    Wi-Fi 機能の初期化を行い，ESP-NOW で通信するための設定を行う関数
+
+    1.  イベントループを作成し，Wi-Fi の接続・切断などのイベントを処理できるようにする
+    2.  ネットワークインタフェースを初期化する
+    3.  Wi-Fi ドライバのデフォルト設定を作成し，初期化する
+    4.  Wi-Fi の動作モードを STA モードに設定する
+    5.  Wi-Fi 設定の保存先ストレージを RAM に設定する
+    6.  Wi-Fi 通信の帯域幅を 40MHz に設定する
+    7.  Wi-Fi ドライバを開始して，Wi-Fi 通信が可能な状態にする
+    8.  Wi-Fi の省電力機能 (Power Save) を無効にする
+    9.  Wi-Fi チャネルとセカンダリチャネルを設定する
+    10. STA インタフェースの MAC アドレスを CONFIG_CSI_SEND_MAC に設定する
+            (受信用 MAC アドレスを準備するか，使用する場面がないためそもそも不必要？)
 */
-#define EXAMPLE_ESP_WIFI_SSID      CONFIG_ESP_WIFI_SSID
-#define EXAMPLE_ESP_WIFI_PASS      CONFIG_ESP_WIFI_PASSWORD
-#define EXAMPLE_ESP_MAXIMUM_RETRY  CONFIG_ESP_MAXIMUM_RETRY
+static void wifi_init()
+{
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-#if CONFIG_ESP_STATION_EXAMPLE_WPA3_SAE_PWE_HUNT_AND_PECK
-#define ESP_WIFI_SAE_MODE WPA3_SAE_PWE_HUNT_AND_PECK
-#define EXAMPLE_H2E_IDENTIFIER ""
-#elif CONFIG_ESP_STATION_EXAMPLE_WPA3_SAE_PWE_HASH_TO_ELEMENT
-#define ESP_WIFI_SAE_MODE WPA3_SAE_PWE_HASH_TO_ELEMENT
-#define EXAMPLE_H2E_IDENTIFIER CONFIG_ESP_WIFI_PW_ID
-#elif CONFIG_ESP_STATION_EXAMPLE_WPA3_SAE_PWE_BOTH
-#define ESP_WIFI_SAE_MODE WPA3_SAE_PWE_BOTH
-#define EXAMPLE_H2E_IDENTIFIER CONFIG_ESP_WIFI_PW_ID
-#endif
-#if CONFIG_ESP_WIFI_AUTH_OPEN
-#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_OPEN
-#elif CONFIG_ESP_WIFI_AUTH_WEP
-#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WEP
-#elif CONFIG_ESP_WIFI_AUTH_WPA_PSK
-#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA_PSK
-#elif CONFIG_ESP_WIFI_AUTH_WPA2_PSK
-#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA2_PSK
-#elif CONFIG_ESP_WIFI_AUTH_WPA_WPA2_PSK
-#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA_WPA2_PSK
-#elif CONFIG_ESP_WIFI_AUTH_WPA3_PSK
-#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA3_PSK
-#elif CONFIG_ESP_WIFI_AUTH_WPA2_WPA3_PSK
-#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA2_WPA3_PSK
-#elif CONFIG_ESP_WIFI_AUTH_WAPI_PSK
-#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WAPI_PSK
-#endif
+    ESP_ERROR_CHECK(esp_netif_init());
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-/* FreeRTOS event group to signal when we are connected*/
-static EventGroupHandle_t s_wifi_event_group;
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
 
-/* The event group allows multiple bits for each event, but we only care about two events:
- * - we are connected to the AP with an IP
- * - we failed to connect after the maximum amount of retries */
-#define WIFI_CONNECTED_BIT BIT0
-#define WIFI_FAIL_BIT      BIT1
+    ESP_ERROR_CHECK(esp_wifi_set_bandwidth(ESP_MAC_WIFI_STA, CONFIG_WIFI_BANDWIDTH));
+    ESP_ERROR_CHECK(esp_wifi_start());
 
-static const char *TAG = "csi_recv_ap";
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
-static int s_retry_num = 0;
+    ESP_ERROR_CHECK(esp_wifi_set_channel(CONFIG_LESS_INTERFERENCE_CHANNEL, WIFI_SECOND_CHAN_BELOW));
 
-typedef struct {
-    int8_t rssi;
-    uint16_t len;
-    uint8_t mac[6];
-    int8_t buf[384];
-} csi_packet_t;
+    ESP_ERROR_CHECK(esp_wifi_set_mac(WIFI_IF_STA, CONFIG_CSI_SEND_MAC));
+}
 
-/* FreeRTOS queue for storing CSI received packets
-   sent from an ISR via xQueueSendFromISR and processed by csi_process_task */
-static QueueHandle_t s_csi_queue = NULL;
+/*  wifi_esp_now_init:
+    ESP-NOW 機能の初期化を行う関数
 
-/* CSI reception callback (interrupt context)
-   copy the RSSI/MAC/length/buffer to csi_packet_t and send it to s_csi_queue using xQueueSendFromISR */
+    1. ESP-NOW 機能を初期化する
+    2. ESP-NOW の暗号化通信に使用する鍵 (Primary Master Key) を設定する
+    3. ESP-NOW で使用する通信方式・通信レートの条件を設定する
+    4. 通信相手 (peer) の情報を ESP-NOW に登録する
+    5. 登録した peer に設定した通信方式・通信レートを適用する
+*/
+static void wifi_esp_now_init(esp_now_peer_info_t peer)
+{
+    ESP_ERROR_CHECK(esp_now_init());
+    ESP_ERROR_CHECK(esp_now_set_pmk((uint8_t *)"pmk1234567890123"));
+    esp_now_rate_config_t rate_config = {
+        .phymode = CONFIG_ESP_NOW_PHYMODE,
+        .rate = CONFIG_ESP_NOW_RATE,//  WIFI_PHY_RATE_MCS0_LGI,
+        .ersu = false,
+        .dcm = false
+    };
+    ESP_ERROR_CHECK(esp_now_add_peer(&peer));
+    ESP_ERROR_CHECK(esp_now_set_peer_rate_config(peer.peer_addr, &rate_config));
+}
+
+/*  wifi_csi_callback:
+    CSI を受信したときに呼び出され，受信した CSI や情報をシリアル出力するコールバック関数
+
+    1. 受信した情報や CSI データがない場合，エラーとして処理を終了する
+    2. 受信したパケットの送信元 MACアドレスが指定した送信元 MAC アドレスと一致するか確認する
+    3. 必要な変数を定義する
+    4. 受信時の AGC ゲインと FFT ゲインを取得する
+    5. 最初の100回分の AGC ゲインと FFT ゲインを記録する
+    6. 101回目のコールバックで，記録した受信ゲインから基準となるゲインを取得する
+    7. CONFIG_FORCE_GAIN が1なら，取得した基準ゲインを受信ゲインとして固定する
+    8. 現在の取得した AGC ゲインと FFT ゲインからゲイン補正倍率を取得する
+    9. 受信した情報やゲイン補正を行った CSI データをシリアル出力する
+*/
 static void wifi_csi_callback(void *ctx, wifi_csi_info_t *info)
 {
-    csi_packet_t pkt;
-    pkt.rssi = info->rx_ctrl.rssi;
-    pkt.len = info->len;
-    memcpy(pkt.mac, info->mac, 6);
-
-    size_t copy_len;
-    if(info->len < sizeof(pkt.buf)) {
-        copy_len = info->len;
-    } else {
-        copy_len = sizeof(pkt.buf);
+    if (!info || !info->buf) {
+        ESP_LOGW(TAG, "<%s> wifi_csi_cb", esp_err_to_name(ESP_ERR_INVALID_ARG));
+        return;
     }
-    memcpy(pkt.buf, info->buf, copy_len);
 
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    xQueueSendFromISR(s_csi_queue, &pkt, &xHigherPriorityTaskWoken);
-    if (xHigherPriorityTaskWoken == pdTRUE) {
-            portYIELD_FROM_ISR();
-        }
-}
+    if (memcmp(info->mac, CONFIG_CSI_SEND_MAC, 6)) {
+        return;
+    }
 
-/* CSI processing task
-   recieve csi_packet_t from s_csi_queue and perform processing such as logging */
-static void csi_process_task(void *pvParameters)
-{
-    csi_packet_t pkt;
-    while(1) {
-        if(xQueueReceive(s_csi_queue, &pkt, portMAX_DELAY) == pdPASS) {
-            ESP_LOGI(TAG, "Recv CSI | RSSI: %d | Len: %d | [I, Q]: [%d, %d], [%d, %d], [%d, %d], [%d, %d], ...",
-                     pkt.rssi, pkt.len, pkt.buf[0], pkt.buf[1], pkt.buf[2], pkt.buf[3], pkt.buf[4], pkt.buf[5], pkt.buf[6], pkt.buf[7]);
+    const wifi_pkt_rx_ctrl_t *rx_ctrl = &info->rx_ctrl;
+    static int s_count = 0;
+    float compensate_gain = 1.0f;
+    static uint8_t agc_gain = 0;
+    static int8_t fft_gain = 0;
+    if (CONFIG_GAIN_CONTROL) {
+        static uint8_t agc_gain_baseline = 0;
+        static int8_t fft_gain_baseline = 0;
+        esp_csi_gain_ctrl_get_rx_gain(rx_ctrl, &agc_gain, &fft_gain);
+        if (s_count < 100) {
+            esp_csi_gain_ctrl_record_rx_gain(agc_gain, fft_gain);
+        } else if (s_count == 100) {
+            esp_csi_gain_ctrl_get_rx_gain_baseline(&agc_gain_baseline, &fft_gain_baseline);
+            if (CONFIG_FORCE_GAIN) {
+                esp_csi_gain_ctrl_set_rx_force_gain(agc_gain_baseline, fft_gain_baseline);
+                ESP_LOGD(TAG, "fft_force %d, agc_force %d", fft_gain_baseline, agc_gain_baseline);
+            }
         }
     }
+    esp_csi_gain_ctrl_get_gain_compensation(&compensate_gain, agc_gain, fft_gain);
+    ESP_LOGI(TAG, "compensate_gain %f, agc_gain %d, fft_gain %d", compensate_gain, agc_gain, fft_gain);
+
+    uint32_t rx_id = *(uint32_t *)(info->payload + 15);
+
+    if (!s_count) {
+        ESP_LOGI(TAG, "================ CSI RECV ================");
+        ets_printf("type,id,mac,rssi,rate,sig_mode,mcs,bandwidth,smoothing,not_sounding,aggregation,stbc,fec_coding,sgi,noise_floor,ampdu_cnt,channel,secondary_channel,local_timestamp,ant,sig_len,rx_format,len,first_word,data\n");
+    }
+
+    ets_printf("CSI_DATA,%d," MACSTR ",%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+               rx_id, MAC2STR(info->mac), rx_ctrl->rssi, rx_ctrl->rate, rx_ctrl->sig_mode,
+               rx_ctrl->mcs, rx_ctrl->cwb, rx_ctrl->smoothing, rx_ctrl->not_sounding,
+               rx_ctrl->aggregation, rx_ctrl->stbc, rx_ctrl->fec_coding, rx_ctrl->sgi,
+               rx_ctrl->noise_floor, rx_ctrl->ampdu_cnt, rx_ctrl->channel, rx_ctrl->secondary_channel,
+               rx_ctrl->timestamp, rx_ctrl->ant, rx_ctrl->sig_len, rx_ctrl->sig_mode);
+
+    ets_printf(",%d,%d,\"[%d", info->len, info->first_word_invalid, (int16_t)(compensate_gain * info->buf[0]));
+    for (int i = 1; i < info->len; i++) {
+        ets_printf(",%d", (int16_t)(compensate_gain * info->buf[i]));
+    }
+
+    ets_printf("]\"\n");
+    s_count++;
 }
 
-/* CSI initialization function
-   create s_csi_queue and start csi_process_task
-   configure CSI settings, register the callback, and enable CSI reception */
-static void app_csi_init(void)
+/*  wifi_csi_init:
+    CSI 取得機能の初期化関数
+
+    1. プロミスキャスモードを有効にする
+    2. CSI の取得条件を設定する
+    3. 設定した CSI の取得条件を ESP32 に適用する
+    4. CSI を受信したときのコールバック関数を登録する
+    5. CSI 取得機能を有効にする
+*/
+static void wifi_csi_init(void)
 {
-    s_csi_queue = xQueueCreate(20, sizeof(csi_packet_t));
-    xTaskCreate(csi_process_task, "csi_process_task", 4096, NULL, 5, NULL);
+    ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
 
     wifi_csi_config_t csi_config = {
         .lltf_en           = true,
@@ -125,123 +172,33 @@ static void app_csi_init(void)
         .ltf_merge_en      = true,
         .channel_filter_en = true,
         .manu_scale        = false,
-        .dump_ack_en       = false
+        .shift             = false,
     };
 
     ESP_ERROR_CHECK(esp_wifi_set_csi_config(&csi_config));
     ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(wifi_csi_callback, NULL));
     ESP_ERROR_CHECK(esp_wifi_set_csi(true));
-
-    ESP_LOGI(TAG, "CSI Enabled Successfully.");
-}
-
-static void event_handler(void* arg, esp_event_base_t event_base,
-                                int32_t event_id, void* event_data)
-{
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (s_retry_num < EXAMPLE_ESP_MAXIMUM_RETRY) {
-            esp_wifi_connect();
-            s_retry_num++;
-            ESP_LOGI(TAG, "retry to connect to the AP");
-        } else {
-            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
-        }
-        ESP_LOGI(TAG,"connect to the AP fail");
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
-        s_retry_num = 0;
-        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-    }
-}
-
-void wifi_init_sta(void)
-{
-    s_wifi_event_group = xEventGroupCreate();
-
-    ESP_ERROR_CHECK(esp_netif_init());
-
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    esp_event_handler_instance_t instance_any_id;
-    esp_event_handler_instance_t instance_got_ip;
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                        ESP_EVENT_ANY_ID,
-                                                        &event_handler,
-                                                        NULL,
-                                                        &instance_any_id));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                        IP_EVENT_STA_GOT_IP,
-                                                        &event_handler,
-                                                        NULL,
-                                                        &instance_got_ip));
-
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = EXAMPLE_ESP_WIFI_SSID,
-            .password = EXAMPLE_ESP_WIFI_PASS,
-            /* Authmode threshold resets to WPA2 as default if auth mode threshold equals WIFI_AUTH_OPEN
-             * and password matches WPA2 standards (password len => 8).
-             * If you want to connect the device to deprecated WEP/WPA networks, Please set the threshold value
-             * to WIFI_AUTH_WEP/WIFI_AUTH_WPA_PSK and set the password with length and format matching to
-             * WIFI_AUTH_WEP/WIFI_AUTH_WPA_PSK standards.
-             */
-            .threshold.authmode = ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD,
-            .sae_pwe_h2e = ESP_WIFI_SAE_MODE,
-            .sae_h2e_identifier = EXAMPLE_H2E_IDENTIFIER,
-#ifdef CONFIG_ESP_WIFI_WPA3_COMPATIBLE_SUPPORT
-            .disable_wpa3_compatible_mode = 0,
-#endif
-        },
-    };
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) );
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config) );
-    ESP_ERROR_CHECK(esp_wifi_start() );
-
-    ESP_LOGI(TAG, "wifi_init_sta finished.");
-
-    /* Waiting until either the connection is established (WIFI_CONNECTED_BIT) or connection failed for the maximum
-     * number of re-tries (WIFI_FAIL_BIT). The bits are set by event_handler() (see above) */
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-            pdFALSE,
-            pdFALSE,
-            portMAX_DELAY);
-
-    /* xEventGroupWaitBits() returns the bits before the call returned, hence we can test which event actually
-     * happened. */
-    if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "connected to ap SSID:%s", EXAMPLE_ESP_WIFI_SSID);
-        app_csi_init();
-    } else if (bits & WIFI_FAIL_BIT) {
-        ESP_LOGI(TAG, "Failed to connect to SSID:%s", EXAMPLE_ESP_WIFI_SSID);
-    } else {
-        ESP_LOGE(TAG, "UNEXPECTED EVENT");
-    }
 }
 
 void app_main(void)
 {
-    //Initialize NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-      ESP_ERROR_CHECK(nvs_flash_erase());
-      ret = nvs_flash_init();
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
 
-    if (CONFIG_LOG_MAXIMUM_LEVEL > CONFIG_LOG_DEFAULT_LEVEL) {
-        /* If you only want to open more logs in the wifi module, you need to make the max level greater than the default level,
-         * and call esp_log_level_set() before esp_wifi_init() to improve the log level of the wifi module. */
-        esp_log_level_set("wifi", CONFIG_LOG_MAXIMUM_LEVEL);
-    }
+    wifi_init();
 
-    ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
-    wifi_init_sta();
+    esp_now_peer_info_t peer = {
+        .channel   = CONFIG_LESS_INTERFERENCE_CHANNEL,
+        .ifidx     = WIFI_IF_STA,
+        .encrypt   = false,
+        .peer_addr = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+    };
+
+    wifi_esp_now_init(peer);
+
+    wifi_csi_init();
 }
