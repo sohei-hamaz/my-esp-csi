@@ -1,5 +1,5 @@
 # Build output
-/build/
+build/
 
 # ESP-IDF local config
 /sdkconfig
@@ -15,3 +15,7 @@
 .vscode/
 .idea/
 .DS_Store
+
+# IDF package manager
+**/managed_components/
+**/*.lock
