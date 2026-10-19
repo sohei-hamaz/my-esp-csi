@@ -27,7 +27,7 @@
 #define CONFIG_GAIN_CONTROL         1
 #define CONFIG_FORCE_GAIN           0
 
-static const char *TAG = "csi_recv_router";
+static const char *TAG = "csi_recv_ap";
 
 static void wifi_csi_callback(void *ctx, wifi_csi_info_t *info)
 {
@@ -101,7 +101,7 @@ static void wifi_csi_init()
     ESP_ERROR_CHECK(esp_wifi_set_csi(true));
 }
 
-/*  wifi_ping_router_start:
+/*  wifi_ping_gateway_start:
     gateway に ping を送信するためのを設定を行い，ping セッションを開始する関数
 
     1. ping セッションのハンドルを定義する
@@ -113,7 +113,7 @@ static void wifi_csi_init()
     7. ping の設定とコールバック構造体を用いて ping セッションを作成する
     8. ping セッションを開始する
 */
-static esp_err_t wifi_ping_router_start()
+static esp_err_t wifi_ping_gateway_start()
 {
     static esp_ping_handle_t ping_handle = NULL;
 
@@ -145,5 +145,5 @@ void app_main(void)
     ESP_ERROR_CHECK(example_connect());
 
     wifi_csi_init();
-    wifi_ping_router_start();
+    wifi_ping_gateway_start();
 }
