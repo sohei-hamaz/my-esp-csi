@@ -36,4 +36,4 @@ while True:
     csi_amplitude_int = csi_amplitude.astype(int)
 
     for value in csi_amplitude_int:
-        print(value)
+        print("*" * (value))
