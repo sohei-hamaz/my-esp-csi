@@ -1,6 +1,7 @@
 import json
 import csv
 import numpy as np
+import sys
 
 import serial
 from io import StringIO
@@ -35,5 +36,9 @@ while True:
 
     csi_amplitude_int = csi_amplitude.astype(int)
 
-    for value in csi_amplitude_int:
-        print("*" * (value))
+    lines = [f"subcarriers: {n}"]
+    for idx, value in enumerate(csi_amplitude_int):
+        lines.append(f"{idx:2d} {value:3d} " + "*" * (value))
+
+    sys.stdout.write("\033[H\033[J" + "\n".join(lines) + "\n")
+    sys.stdout.flush()
