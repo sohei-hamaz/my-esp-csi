@@ -36,5 +36,4 @@ while True:
     csi_amplitude_array = np.abs(csi_data_complex)
     csi_phase_array = np.angle(csi_data_complex)
 
-    print("amplitude:", csi_amplitude_array)
-    print("phase:", csi_phase_array)
+    print(csi_amplitude_array.astype(int))
