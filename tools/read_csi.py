@@ -5,10 +5,7 @@ import numpy as np
 import serial
 from io import StringIO
 
-CSI_DATA_INDEX = 200
 CSI_DATA_COLUMNS = 64
-
-csi_data_complex = np.zeros([CSI_DATA_INDEX, CSI_DATA_COLUMNS], dtype=np.complex64)
 
 ser = serial.Serial("/dev/ttyACM0", 115200, timeout=1)
 
@@ -27,13 +24,16 @@ while True:
     except ValueError:
         continue
 
-    csi_data_complex[:-1] = csi_data_complex[1:]
+    n = min(csi_data_len // 2, CSI_DATA_COLUMNS, len(csi_raw_data) // 2)
 
-    for i in range(csi_data_len // 2):
-        csi_data_complex[-1][i] = complex(csi_raw_data[i * 2 + 1],
-                                          csi_raw_data[i * 2])
+    csi_data_complex = np.array(
+        [complex(csi_raw_data[i * 2 + 1], csi_raw_data[i * 2]) for i in range(n)]
+    )
 
-    csi_amplitude_array = np.abs(csi_data_complex)
-    csi_phase_array = np.angle(csi_data_complex)
+    csi_amplitude = np.abs(csi_data_complex)
+    csi_phase = np.angle(csi_data_complex)
 
-    print(csi_amplitude_array.astype(int))
+    csi_amplitude_int = csi_amplitude.astype(int)
+
+    for value in csi_amplitude_int:
+        print(value)
