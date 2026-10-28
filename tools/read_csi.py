@@ -10,6 +10,13 @@ CSI_DATA_COLUMNS = 64
 
 prev = None
 
+def phase_bar(d, width=41, rng=90):
+    d = max(-rng, min(rng, d))
+    bar = ["-"] * width
+    bar[width // 2] = ":"
+    bar[int((d + rng) / (2 * rng) * (width - 1))] = "|"
+    return "".join(bar)
+
 ser = serial.Serial("/dev/ttyACM0", 115200, timeout=1)
 
 while True:
@@ -47,7 +54,7 @@ while True:
 
     lines = [f"subcarriers: {n}"]
     for idx, value in enumerate(csi_amplitude_int):
-        lines.append(f"{idx:2d} {csi_phase_deg[idx]:4d}゜ {diff_deg[idx]:4d}°  {value:3d} " + "*" * (value * (value // 4)))
+        lines.append(f"{idx:2d} {csi_phase_deg[idx]:4d}゜ {diff_deg[idx]:4d}°  [{phase_bar(diff_deg[idx])}] {value:3d} " + "*" * (value * (value // 4)))
 
     sys.stdout.write("\033[H\033[J" + "\n".join(lines) + "\n")
     sys.stdout.flush()
