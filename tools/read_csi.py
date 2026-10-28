@@ -32,13 +32,14 @@ while True:
     )
 
     csi_amplitude = np.abs(csi_data_complex)
-    csi_phase = np.angle(csi_data_complex)
+    csi_phase = np.angle(csi_data_complex, deg=True) # deg: 度表記
 
     csi_amplitude_int = csi_amplitude.astype(int)
+    csi_phase_int = csi_phase.astype(int)
 
     lines = [f"subcarriers: {n}"]
     for idx, value in enumerate(csi_amplitude_int):
-        lines.append(f"{idx:2d} {value:3d} " + "*" * (value))
+        lines.append(f"{idx:2d} {csi_phase_int[idx]:4d}゜ {value:3d} " + "*" * (value * (value // 4)))
 
     sys.stdout.write("\033[H\033[J" + "\n".join(lines) + "\n")
     sys.stdout.flush()
