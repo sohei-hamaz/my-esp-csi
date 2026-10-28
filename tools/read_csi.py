@@ -8,6 +8,8 @@ from io import StringIO
 
 CSI_DATA_COLUMNS = 64
 
+prev = None
+
 ser = serial.Serial("/dev/ttyACM0", 115200, timeout=1)
 
 while True:
@@ -32,14 +34,20 @@ while True:
     )
 
     csi_amplitude = np.abs(csi_data_complex)
-    csi_phase = np.angle(csi_data_complex, deg=True) # deg: 度表記
+    csi_phase = np.angle(csi_data_complex)
 
     csi_amplitude_int = csi_amplitude.astype(int)
-    csi_phase_int = csi_phase.astype(int)
+    csi_phase_deg = np.degrees(csi_phase).astype(int) # deg: 度表記
+
+    if prev is None or len(prev) != n:
+        prev = csi_data_complex
+        continue
+    diff_deg = np.degrees(np.angle(csi_data_complex * np.conj(prev))).astype(int)
+    prev = csi_data_complex
 
     lines = [f"subcarriers: {n}"]
     for idx, value in enumerate(csi_amplitude_int):
-        lines.append(f"{idx:2d} {csi_phase_int[idx]:4d}゜ {value:3d} " + "*" * (value * (value // 4)))
+        lines.append(f"{idx:2d} {csi_phase_deg[idx]:4d}゜ {diff_deg[idx]:4d}°  {value:3d} " + "*" * (value * (value // 4)))
 
     sys.stdout.write("\033[H\033[J" + "\n".join(lines) + "\n")
     sys.stdout.flush()
