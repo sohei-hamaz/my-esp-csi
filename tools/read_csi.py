@@ -27,11 +27,14 @@ while True:
 
     csv_reader = csv.reader(StringIO(strings))
     csi_data = next(csv_reader)
-    csi_data_len = int (csi_data[-3])
 
     try:
+        csi_data_len = int (csi_data[-3])
         csi_raw_data = json.loads(csi_data[-1])
     except ValueError:
+        continue
+
+    if csi_data_len != 128:
         continue
 
     n = min(csi_data_len // 2, CSI_DATA_COLUMNS, len(csi_raw_data) // 2)
@@ -49,12 +52,20 @@ while True:
     if prev is None or len(prev) != n:
         prev = csi_data_complex
         continue
-    diff_deg = np.degrees(np.angle(csi_data_complex * np.conj(prev))).astype(int)
+    diff = np.angle(csi_data_complex * np.conj(prev))
+    valid = (csi_amplitude > 0) & (np.abs(prev) > 0)
     prev = csi_data_complex
+
+    diff_deg = np.zeros(n, dtype=int)
+    if valid.sum() > 4:
+        k = np.arange(n)
+        ph = np.unwrap(diff[valid])
+        slope, intercept = np.polyfit(k[valid], ph, 1)
+        diff_deg[valid] = np.degrees(ph - (slope * k[valid] + intercept)).astype(int)
 
     lines = [f"subcarriers: {n}"]
     for idx, value in enumerate(csi_amplitude_int):
-        lines.append(f"{idx:2d} {csi_phase_deg[idx]:4d}゜ {diff_deg[idx]:4d}°  [{phase_bar(diff_deg[idx])}] {value:3d} " + "*" * (value * (value // 4)))
+        lines.append(f"{idx:2d} {csi_phase_deg[idx]:4d}゜ {diff_deg[idx]:4d}°  [{phase_bar(diff_deg[idx])}] {value:3d} " + "*" * (value * (value // 5)))
 
     sys.stdout.write("\033[H\033[J" + "\n".join(lines) + "\n")
     sys.stdout.flush()

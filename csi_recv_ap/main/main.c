@@ -22,7 +22,7 @@
 #include "protocol_examples_common.h"
 #include "esp_csi_gain_ctrl.h"
 
-#define CONFIG_SEND_FREQUENCY       3
+#define CONFIG_SEND_FREQUENCY       50
 
 #define CONFIG_GAIN_CONTROL         1
 #define CONFIG_FORCE_GAIN           0
