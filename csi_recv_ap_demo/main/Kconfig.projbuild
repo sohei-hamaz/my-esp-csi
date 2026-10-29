@@ -34,6 +34,18 @@ menu "Example Configuration"
         help
             password identifier for SAE H2E
 
+    config CSI_MQTT_BROKER_URI
+        string "MQTT broker URI"
+        default "mqtt://192.168.1.100"
+        help
+            URI of the MQTT broker, for example mqtt://192.168.1.10:1883.
+
+    config CSI_MQTT_TOPIC
+        string "MQTT topic"
+        default "csi/data"
+        help
+            Topic used to publish CSV-formatted CSI records.
+
     config ESP_MAXIMUM_RETRY
         int "Maximum retry"
         default 5

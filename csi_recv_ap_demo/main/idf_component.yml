@@ -2,3 +2,4 @@
 dependencies:
   idf: ">=4.4.1"
   esp_csi_gain_ctrl: ">=0.1.4"
+  espressif/mqtt: "^1.0.0"
