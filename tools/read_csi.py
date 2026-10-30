@@ -1,14 +1,17 @@
-import json
+import argparse
 import csv
-import numpy as np
-import sys
-
-import serial
+import json
+import logging
 from io import StringIO
+from urllib.parse import urlparse
+
+import numpy as np
+import paho.mqtt.client as mqtt
 
 CSI_DATA_COLUMNS = 64
 
 prev = None
+
 
 def phase_bar(d, width=41, rng=90):
     d = max(-rng, min(rng, d))
@@ -17,25 +20,22 @@ def phase_bar(d, width=41, rng=90):
     bar[int((d + rng) / (2 * rng) * (width - 1))] = "|"
     return "".join(bar)
 
-ser = serial.Serial("/dev/ttyACM0", 115200, timeout=1)
 
-while True:
-    strings = str(ser.readline())
-    strings = strings.lstrip('b\'').rstrip('\\r\\n\'')
-    if not strings.startswith("CSI_DATA"):
-        continue
-
-    csv_reader = csv.reader(StringIO(strings))
-    csi_data = next(csv_reader)
+def display_csi_data(payload):
+    global prev
 
     try:
-        csi_data_len = int (csi_data[-3])
+        csi_data = next(csv.reader(StringIO(payload)))
+        if not csi_data or csi_data[0] != "CSI_DATA":
+            return
+        csi_data_len = int(csi_data[-3])
         csi_raw_data = json.loads(csi_data[-1])
-    except ValueError:
-        continue
+    except (StopIteration, ValueError, IndexError, csv.Error):
+        logging.warning("Ignoring malformed CSI MQTT message")
+        return
 
     if csi_data_len != 128:
-        continue
+        return
 
     n = min(csi_data_len // 2, CSI_DATA_COLUMNS, len(csi_raw_data) // 2)
 
@@ -47,11 +47,12 @@ while True:
     csi_phase = np.angle(csi_data_complex)
 
     csi_amplitude_int = csi_amplitude.astype(int)
-    csi_phase_deg = np.degrees(csi_phase).astype(int) # deg: 度表記
+    csi_phase_deg = np.degrees(csi_phase).astype(int)
 
     if prev is None or len(prev) != n:
         prev = csi_data_complex
-        continue
+        return
+
     diff = np.angle(csi_data_complex * np.conj(prev))
     valid = (csi_amplitude > 0) & (np.abs(prev) > 0)
     prev = csi_data_complex
@@ -65,7 +66,72 @@ while True:
 
     lines = [f"subcarriers: {n}"]
     for idx, value in enumerate(csi_amplitude_int):
-        lines.append(f"{idx:2d} {csi_phase_deg[idx]:4d}゜ {diff_deg[idx]:4d}°  [{phase_bar(diff_deg[idx])}] {value:3d} " + "*" * (value * (value // 5)))
+        lines.append(
+            f"{idx:2d} {csi_phase_deg[idx]:4d}゜ {diff_deg[idx]:4d}°  "
+            f"[{phase_bar(diff_deg[idx])}] {value:3d} "
+            + "*" * (value * (value // 5))
+        )
 
-    sys.stdout.write("\033[H\033[J" + "\n".join(lines) + "\n")
-    sys.stdout.flush()
+    print("\033[H\033[J" + "\n".join(lines), flush=True)
+
+
+def on_connect(client, userdata, flags, reason_code):
+    if reason_code != 0:
+        logging.error("MQTT connection failed with status %s", reason_code)
+        return
+
+    topic = userdata["topic"]
+    result, _ = client.subscribe(topic)
+    if result != mqtt.MQTT_ERR_SUCCESS:
+        logging.error("Failed to subscribe to MQTT topic %s", topic)
+        return
+    logging.info("Connected to MQTT broker and subscribed to %s", topic)
+
+
+def on_message(client, userdata, message):
+    try:
+        payload = message.payload.decode("utf-8")
+    except UnicodeDecodeError:
+        logging.warning("Ignoring non-UTF-8 MQTT message")
+        return
+
+    display_csi_data(payload)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Receive and display CSI data over MQTT.")
+    parser.add_argument(
+        "--broker",
+        default="mqtt://192.168.1.100",
+        help="MQTT broker URI (default: mqtt://192.168.1.100)",
+    )
+    parser.add_argument("--topic", default="csi/data", help="MQTT topic (default: csi/data)")
+    args = parser.parse_args()
+
+    broker = urlparse(args.broker)
+    if broker.scheme != "mqtt" or not broker.hostname or broker.path not in ("", "/"):
+        parser.error("--broker must be an mqtt:// URI with a hostname and no path")
+    try:
+        broker_port = broker.port or 1883
+    except ValueError as error:
+        parser.error(f"invalid MQTT broker port: {error}")
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    if hasattr(mqtt, "CallbackAPIVersion"):
+        client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION1)
+    else:
+        client = mqtt.Client()
+    client.user_data_set({"topic": args.topic})
+    client.on_connect = on_connect
+    client.on_message = on_message
+
+    if broker.username:
+        client.username_pw_set(broker.username, broker.password)
+
+    client.connect(broker.hostname, broker_port)
+    client.loop_forever()
+
+
+if __name__ == "__main__":
+    main()
