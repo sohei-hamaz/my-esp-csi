@@ -21,7 +21,7 @@
 #include "esp_csi_gain_ctrl.h"
 #include "mqtt_client.h"
 
-#define CONFIG_SEND_FREQUENCY       50
+#define CONFIG_SEND_FREQUENCY       10
 #define CSI_MQTT_PAYLOAD_SIZE       2048
 #define CSI_MQTT_QUEUE_LENGTH       10
 #define MQTT_CONNECTED_BIT          BIT0
