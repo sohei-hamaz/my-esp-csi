@@ -25,6 +25,7 @@
 #define CSI_MQTT_PAYLOAD_SIZE       2048
 #define CSI_MQTT_QUEUE_LENGTH       10
 #define MQTT_CONNECTED_BIT          BIT0
+#define WIFI_CONNECTED_BIT          BIT1
 
 #define CONFIG_GAIN_CONTROL         1
 #define CONFIG_FORCE_GAIN           0
@@ -32,7 +33,58 @@
 static const char *TAG = "csi_recv_ap";
 static QueueHandle_t s_csi_queue;
 static EventGroupHandle_t s_mqtt_event_group;
+static EventGroupHandle_t s_wifi_event_group;
 static esp_mqtt_client_handle_t s_mqtt_client;
+static esp_netif_t *s_wifi_netif;
+
+static void wifi_event_handler(void *arg, esp_event_base_t event_base,
+                               int32_t event_id, void *event_data)
+{
+    (void)arg;
+    (void)event_data;
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        ESP_ERROR_CHECK(esp_wifi_connect());
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+        ESP_LOGW(TAG, "Wi-Fi disconnected; reconnecting");
+        esp_wifi_connect();
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *event = event_data;
+        ESP_LOGI(TAG, "Connected with static IP " IPSTR, IP2STR(&event->ip_info.ip));
+        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+    }
+}
+
+static void wifi_connect_static(void)
+{
+    wifi_init_config_t init_config = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&init_config));
+    s_wifi_netif = esp_netif_create_default_wifi_sta();
+    ESP_ERROR_CHECK(s_wifi_netif ? ESP_OK : ESP_ERR_NO_MEM);
+
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                                wifi_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                                wifi_event_handler, NULL));
+
+    ESP_ERROR_CHECK(esp_netif_dhcpc_stop(s_wifi_netif));
+    esp_netif_ip_info_t ip_info = {0};
+    IP4_ADDR(&ip_info.ip, 192, 168, 0, 201);
+    IP4_ADDR(&ip_info.gw, 192, 168, 0, 2);
+    IP4_ADDR(&ip_info.netmask, 255, 255, 255, 0);
+    ESP_ERROR_CHECK(esp_netif_set_ip_info(s_wifi_netif, &ip_info));
+
+    wifi_config_t wifi_config = {0};
+    strlcpy((char *)wifi_config.sta.ssid, CONFIG_EXAMPLE_WIFI_SSID,
+            sizeof(wifi_config.sta.ssid));
+    strlcpy((char *)wifi_config.sta.password, CONFIG_EXAMPLE_WIFI_PASSWORD,
+            sizeof(wifi_config.sta.password));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE,
+                        portMAX_DELAY);
+}
 
 static bool append_csi_value(char *payload, size_t capacity, size_t *length, int value)
 {
@@ -227,8 +279,8 @@ static esp_err_t wifi_ping_gateway_start()
     ping_config.task_stack_size   = 3072;
     ping_config.data_size         = 1;
 
-    esp_netif_ip_info_t local_ip;
-    esp_netif_get_ip_info(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), &local_ip);
+    esp_netif_ip_info_t local_ip = {0};
+    ESP_ERROR_CHECK(esp_netif_get_ip_info(s_wifi_netif, &local_ip));
     ESP_LOGI(TAG, "got ip:" IPSTR ", gw: " IPSTR, IP2STR(&local_ip.ip), IP2STR(&local_ip.gw));
     ping_config.target_addr.u_addr.ip4.addr = ip4_addr_get_u32(&local_ip.gw);
     ping_config.target_addr.type = ESP_IPADDR_TYPE_V4;
@@ -246,7 +298,9 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    ESP_ERROR_CHECK(example_connect());
+    s_wifi_event_group = xEventGroupCreate();
+    ESP_ERROR_CHECK(s_wifi_event_group ? ESP_OK : ESP_ERR_NO_MEM);
+    wifi_connect_static();
 
     mqtt_init();
     wifi_csi_init();
