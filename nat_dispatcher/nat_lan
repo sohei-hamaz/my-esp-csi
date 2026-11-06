@@ -1,0 +1,85 @@
+#!/bin/bash
+
+LAN_IF="$1"
+ACTION="$2"
+
+LAN_NET=$(ip -4 route show dev "$LAN_IF" proto kernel scope link |
+  awk '{print $1; exit}')
+STATE_FILE="/run/nat-lan.state"
+
+[ "$CONNECTION_ID" = "nat-lan" ] || exit 0
+
+case "$ACTION" in
+    # 有線接続したら動作
+    up)
+        # Wi-Fi 側のインタフェースを取得
+        WAN_IF=$(ip -4 route show default |
+            awk '/^default/ {for (i=1; i<=NF; i++) if ($i=="dev") {print $(i+1); exit}}')
+
+        [ -f "$STATE_FILE" ] && exit 0
+        [ -n "$LAN_NET" ] || exit 1
+        [ -n "$WAN_IF" ] || exit 1
+        [ "$WAN_IF" != "$LAN_IF" ] || exit 1
+
+        OLD_FORWARD=$(sysctl -n net.ipv4.ip_forward)
+
+	# IPv4 フォワーディングを有効化
+        sysctl -w net.ipv4.ip_forward=1
+
+	# NAT 有効化
+        iptables -t nat -A POSTROUTING \
+            -s "$LAN_NET" \
+            -o "$WAN_IF" \
+            -j MASQUERADE
+
+	# iptables FORWARD 有効化
+        iptables -I FORWARD 1 \
+            -i "$LAN_IF" \
+            -o "$WAN_IF" \
+            -s "$LAN_NET" \
+            -j ACCEPT
+
+        iptables -I FORWARD 1 \
+            -i "$WAN_IF" \
+            -o "$LAN_IF" \
+            -d "$LAN_NET" \
+            -m conntrack --ctstate ESTABLISHED,RELATED \
+            -j ACCEPT
+
+        printf '%s\n%s\n%s\n%s\n' \
+            "$LAN_IF" "$WAN_IF" "$LAN_NET" "$OLD_FORWARD" > "$STATE_FILE"
+        ;;
+    # 有線接続を切ったら動作
+    down)
+        [ -f "$STATE_FILE" ] || exit 0
+
+        {
+            read -r LAN_IF
+            read -r WAN_IF
+            read -r LAN_NET
+            read -r OLD_FORWARD
+        } < "$STATE_FILE"
+
+        iptables -t nat -D POSTROUTING \
+            -s "$LAN_NET" \
+            -o "$WAN_IF" \
+            -j MASQUERADE
+
+        iptables -D FORWARD \
+            -i "$LAN_IF" \
+            -o "$WAN_IF" \
+            -s "$LAN_NET" \
+            -j ACCEPT
+
+        iptables -D FORWARD \
+            -i "$WAN_IF" \
+            -o "$LAN_IF" \
+            -d "$LAN_NET" \
+            -m conntrack --ctstate ESTABLISHED,RELATED \
+            -j ACCEPT
+
+        sysctl -w net.ipv4.ip_forward="$OLD_FORWARD"
+
+        rm -f "$STATE_FILE"
+        ;;
+esac
